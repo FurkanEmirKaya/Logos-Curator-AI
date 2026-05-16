@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────
 # Token & Karakter Limitleri
 # ─────────────────────────────────────────
-MAX_CODE_CHARS = 15_000        # ~3750 token — yüklenen kod/proje içeriği
+MAX_CODE_CHARS = 100_000       # ~25.000 token — yüklenen kod/proje içeriği
 MAX_PROMPT_CHARS = 1_000       # ~250 token  — kullanıcı talimatı
 MAX_DECISION_MAKER_CHARS = 3_000   # Karar Verici ajanına gönderilen kod özeti
 MAX_ORCHESTRATOR_REPORT_CHARS = 1_500  # Orkestratör, her ajan raporundan bu kadar okur
