@@ -6,6 +6,7 @@ from typing import List, Any, Dict, Optional
 import asyncio, sqlite3, json, zipfile, io
 
 import agents
+from agents import QuotaExceededError
 from personas import get_all_personas
 from config import (
     MAX_CODE_CHARS, MAX_PROMPT_CHARS, MAX_ITERATIONS, STAGGER_DELAY_SECONDS,
@@ -33,6 +34,7 @@ class ReviewRequest(BaseModel):
     code: str = Field(..., max_length=MAX_CODE_CHARS)
     user_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
     agent_ids: List[str] = []
+    model: str = Field(default="gemini-2.5-flash")
 
 class MakerBotRequest(BaseModel):
     user_prompt: str = Field(default="", max_length=MAX_PROMPT_CHARS)
@@ -47,6 +49,7 @@ class GenerateRequest(BaseModel):
 class ResumeRequest(BaseModel):
     session_id: int
     new_agent_ids: List[str]
+    model: str = Field(default="gemini-2.5-flash")
 
 class DownloadZipRequest(BaseModel):
     files: List[Dict[str, str]]  # [{"path": ..., "content": ...}]
@@ -68,12 +71,17 @@ def _ensure_schema(cursor):
             code TEXT,
             teams_data TEXT,
             dependencies_md TEXT,
-            codemap_md TEXT
+            codemap_md TEXT,
+            context_summary_md TEXT
         )
     """)
     # Migrate older DBs that lack the new columns
     existing = {row[1] for row in cursor.execute("PRAGMA table_info(sessions)")}
-    for col, ctype in [("dependencies_md", "TEXT"), ("codemap_md", "TEXT")]:
+    for col, ctype in [
+        ("dependencies_md", "TEXT"),
+        ("codemap_md", "TEXT"),
+        ("context_summary_md", "TEXT")
+    ]:
         if col not in existing:
             cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ctype}")
 
@@ -255,128 +263,135 @@ def get_personas():
 
 @app.post("/analyze")
 async def analyze_code(request: ReviewRequest):
-    all_personas = get_all_personas()
+    try:
+        all_personas = get_all_personas()
+        # Dinamik model— frontend'den gelen model adını kullan
+        await asyncio.to_thread(agents.set_model, request.model)
 
-    # ── Adım 1: Takımları oluştur ─────────────────────────────────
-    if request.user_prompt:
-        teams = await asyncio.to_thread(
-            agents.run_decision_maker,
-            request.user_prompt,
+        # ── Adım 1: Takımları oluştur ─────────────────────────────────
+        if request.user_prompt:
+            teams = await asyncio.to_thread(
+                agents.run_decision_maker,
+                request.user_prompt,
+                request.code,
+                all_personas,
+            )
+        else:
+            if not request.agent_ids:
+                return {"status": "error", "message": "En az bir ajan seçilmelidir veya geçerli bir prompt girilmelidir."}
+            teams = [{**DEFAULT_TEAM, "members": request.agent_ids}]
+
+        # ── Adım 2: Proje bağımlılık analizi (dependencies.md) ────────
+        dependencies_md = await asyncio.to_thread(
+            agents.run_project_analyzer,
             request.code,
-            all_personas,
-        )
-    else:
-        if not request.agent_ids:
-            return {"status": "error", "message": "En az bir ajan seçilmelidir veya geçerli bir prompt girilmelidir."}
-        teams = [{**DEFAULT_TEAM, "members": request.agent_ids}]
-
-    # ── Adım 2: Proje bağımlılık analizi (dependencies.md) ────────
-    dependencies_md = await asyncio.to_thread(
-        agents.run_project_analyzer,
-        request.code,
-    )
-
-    # ── Adım 3: Kod haritası oluştur (codemap.md) ─────────────────
-    codemap_md = await asyncio.to_thread(
-        agents.run_codemap_generator,
-        request.code,
-        teams,
-        dependencies_md,
-    )
-
-    # ── Adım 4: Her takım için codemap'ten ilgili bölümü çıkar ────
-    def extract_codemap_for_team(team_name: str, codemap: str) -> str:
-        """codemap.md içinde o takımla ilgili satırları filtrele."""
-        lines = codemap.splitlines()
-        relevant = [l for l in lines if team_name.lower() in l.lower() or l.startswith("#") or l.startswith("|--")]
-        return "\n".join(relevant[:40]) if relevant else codemap[:600]
-
-    # ── Adım 5: Takımları sırayla çalıştır ────────────────────────
-    async def run_agent_staggered(agent_id, code, focus, feedback, codemap_ctx, deps_ctx, delay, ctx_summary):
-        if delay > 0:
-            await asyncio.sleep(delay)
-        return await asyncio.to_thread(
-            agents.run_agent,
-            agent_id, code, focus, feedback, codemap_ctx, deps_ctx, ctx_summary
         )
 
-    team_results = []
-    global_context_summary = ""
-    for team in teams:
-        team_name  = team.get("name", "Bilinmeyen Takım")
-        focus_area = team.get("focus_area", "")
-        members    = team.get("members", [])
+        # ── Adım 3: Kod haritası oluştur (codemap.md) ─────────────────
+        codemap_md = await asyncio.to_thread(
+            agents.run_codemap_generator,
+            request.code,
+            teams,
+            dependencies_md,
+        )
 
-        team_codemap = extract_codemap_for_team(team_name, codemap_md)
-        deps_summary = dependencies_md[:600]  # İlk 600 karakter özet olarak yeterli
+        # ── Adım 4: Her takım için codemap'ten ilgili bölümü çıkar ────
+        def extract_codemap_for_team(team_name: str, codemap: str) -> str:
+            """codemap.md içinde o takımla ilgili satırları filtrele."""
+            lines = codemap.splitlines()
+            relevant = [l for l in lines if team_name.lower() in l.lower() or l.startswith("#") or l.startswith("|--")]
+            return "\n".join(relevant[:40]) if relevant else codemap[:600]
 
-        iteration_history = []
-        current_feedback  = ""
-
-        for iteration in range(1, MAX_ITERATIONS + 1):
-            tasks = [
-                run_agent_staggered(
-                    agent_id, request.code, focus_area,
-                    current_feedback, team_codemap, deps_summary,
-                    idx * STAGGER_DELAY_SECONDS,
-                    global_context_summary
-                )
-                for idx, agent_id in enumerate(members)
-            ]
-            reports = await asyncio.gather(*tasks)
-            member_reports = dict(zip(members, reports))
-
-            consensus_result = (
-                await asyncio.to_thread(agents.run_consensus_checker, team_name, member_reports, focus_area)
-                if len(members) > 1
-                else {"consensus_reached": True, "feedback": "", "synthesis": "Tek kişilik takım."}
+        # ── Adım 5: Takımları sırayla çalıştır ────────────────────────
+        async def run_agent_staggered(agent_id, code, focus, feedback, codemap_ctx, deps_ctx, delay, ctx_summary):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return await asyncio.to_thread(
+                agents.run_agent,
+                agent_id, code, focus, feedback, codemap_ctx, deps_ctx, ctx_summary
             )
 
-            iteration_history.append({
-                "iteration": iteration,
-                "reports": member_reports,
-                "consensus_result": consensus_result,
+        team_results = []
+        global_context_summary = ""
+        for team in teams:
+            team_name  = team.get("name", "Bilinmeyen Takım")
+            focus_area = team.get("focus_area", "")
+            members    = team.get("members", [])
+
+            team_codemap = extract_codemap_for_team(team_name, codemap_md)
+            deps_summary = dependencies_md[:600]  # İlk 600 karakter özet olarak yeterli
+
+            iteration_history = []
+            current_feedback  = ""
+
+            for iteration in range(1, MAX_ITERATIONS + 1):
+                tasks = [
+                    run_agent_staggered(
+                        agent_id, request.code, focus_area,
+                        current_feedback, team_codemap, deps_summary,
+                        idx * STAGGER_DELAY_SECONDS,
+                        global_context_summary
+                    )
+                    for idx, agent_id in enumerate(members)
+                ]
+                reports = await asyncio.gather(*tasks)
+                member_reports = dict(zip(members, reports))
+
+                consensus_result = (
+                    await asyncio.to_thread(agents.run_consensus_checker, team_name, member_reports, focus_area)
+                    if len(members) > 1
+                    else {"consensus_reached": True, "feedback": "", "synthesis": "Tek kişilik takım."}
+                )
+
+                iteration_history.append({
+                    "iteration": iteration,
+                    "reports": member_reports,
+                    "consensus_result": consensus_result,
+                })
+
+                if consensus_result.get("consensus_reached", True) or iteration == MAX_ITERATIONS:
+                    break
+                current_feedback = consensus_result.get("feedback", "")
+
+            team_results.append({
+                "name": team_name,
+                "focus_area": focus_area,
+                "iterations": iteration_history,
+                "final_synthesis": iteration_history[-1]["consensus_result"].get("synthesis", ""),
+                "reports": iteration_history[-1]["reports"],
             })
 
-            if consensus_result.get("consensus_reached", True) or iteration == MAX_ITERATIONS:
-                break
-            current_feedback = consensus_result.get("feedback", "")
+            # Update the global context summary after the team finishes
+            latest_events = f"Takım: {team_name}\nKarar/Sentez: {iteration_history[-1]['consensus_result'].get('synthesis', '')}"
+            global_context_summary = await asyncio.to_thread(
+                agents.run_context_summarizer,
+                global_context_summary, request.user_prompt, latest_events
+            )
 
-        team_results.append({
-            "name": team_name,
-            "focus_area": focus_area,
-            "iterations": iteration_history,
-            "final_synthesis": iteration_history[-1]["consensus_result"].get("synthesis", ""),
-            "reports": iteration_history[-1]["reports"],
-        })
+        # ── Adım 6: Orkestratör — Maker Bot talimatları ───────────────
+        for tr in team_results:
+            tr["maker_bot_brief"] = await asyncio.to_thread(
+                agents.run_orchestrator_summary,
+                tr["name"], tr["focus_area"], tr["reports"], tr.get("final_synthesis", ""),
+            )
 
-        # Update the global context summary after the team finishes
-        latest_events = f"Takım: {team_name}\nKarar/Sentez: {iteration_history[-1]['consensus_result'].get('synthesis', '')}"
-        global_context_summary = await asyncio.to_thread(
-            agents.run_context_summarizer,
-            global_context_summary, request.user_prompt, latest_events
+        session_id = save_analysis_session(
+            request.user_prompt, request.code, team_results,
+            dependencies_md=dependencies_md, codemap_md=codemap_md,
+            context_summary_md=global_context_summary
         )
-
-    # ── Adım 6: Orkestratör — Maker Bot talimatları ───────────────
-    for tr in team_results:
-        tr["maker_bot_brief"] = await asyncio.to_thread(
-            agents.run_orchestrator_summary,
-            tr["name"], tr["focus_area"], tr["reports"], tr.get("final_synthesis", ""),
-        )
-
-    session_id = save_analysis_session(
-        request.user_prompt, request.code, team_results,
-        dependencies_md=dependencies_md, codemap_md=codemap_md,
-        context_summary_md=global_context_summary
-    )
-    return {
-        "status": "success",
-        "session_id": session_id,
-        "teams": team_results,
-        "dependencies_md": dependencies_md,
-        "codemap_md": codemap_md,
-        "context_summary_md": global_context_summary
-    }
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "teams": team_results,
+            "dependencies_md": dependencies_md,
+            "codemap_md": codemap_md,
+            "context_summary_md": global_context_summary
+        }
+    except QuotaExceededError as qe:
+        return {"status": "error", "message": str(qe)}
+    except Exception as e:
+        return {"status": "error", "message": f"Sistem hatası: {str(e)}"}
 
 
 @app.post("/analyze/resume")
@@ -385,6 +400,9 @@ async def resume_analysis(request: ResumeRequest):
     Kullanıcının önerilen ajanları takıma dahil edip mevcut oturuma eklemesini sağlar.
     Mevcut ajanlar tekrar çalıştırılmaz (token tasarrufu).
     """
+    # 0. Dinamik model
+    await asyncio.to_thread(agents.set_model, request.model)
+
     # 1. Oturumu getir
     conn = _get_db()
     cursor = conn.cursor()

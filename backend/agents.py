@@ -11,7 +11,41 @@ from config import (
 
 load_dotenv()
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview")
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+
+class QuotaExceededError(Exception):
+    """API kotası dolduğunda fırlatılır."""
+    pass
+
+def _safe_invoke(chain, inputs):
+    try:
+        return chain.invoke(inputs)
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            raise QuotaExceededError("Gemini API kotası doldu. Lütfen 1 dakika bekleyin veya daha yüksek kotalı bir modele (örn: Flash) geçin.")
+        raise e
+
+# ─────────────────────────────────────────
+# Dinamik Model Güncelleyici
+# ─────────────────────────────────────────
+_ALLOWED_MODELS = {
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+}
+
+def set_model(model_id: str) -> None:
+    """Frontend'den gelen model ID'sine göre global llm'i günceller."""
+    global llm
+    if model_id in _ALLOWED_MODELS:
+        llm = ChatGoogleGenerativeAI(model=model_id)
+        print(f"[Model] {model_id} aktif.")
+    else:
+        print(f"[Model] Geçersiz model '{model_id}', varsayılan kullanılıyor.")
 
 # ─────────────────────────────────────────
 # ORCHESTRATOR PROTOCOL (New Core Mission)
@@ -67,7 +101,7 @@ def _check_and_fix_language(text: str) -> str:
                            "Keep the same style, formatting, and markdown tags."),
                 ("user", "{text}"),
             ]) | llm
-            return _to_str(fix_chain.invoke({"text": text}).content)
+            return _to_str(_safe_invoke(fix_chain, {"text": text}).content)
     return text
 
 # ─────────────────────────────────────────
@@ -126,7 +160,7 @@ def run_agent(
         ("system", system_prompt),
         ("user", "Aşağıdaki konsepti/kodu incele ve raporunu sun:\n\n{code}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    raw_output = _to_str(chain.invoke({"code": code_input}).content)
+    raw_output = _to_str(_safe_invoke(chain, {"code": code_input}).content)
     return _check_and_fix_language(raw_output)
 
 
@@ -179,7 +213,7 @@ Görevin: Kod tabanını analiz edip aşağıdaki Markdown formatında SADECE ş
         ("system", system_prompt),
         ("user", "Kod tabanı:\n\n{code}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    return _to_str(chain.invoke({"code": code_input}).content)
+    return _to_str(_safe_invoke(chain, {"code": code_input}).content)
 
 
 # ─────────────────────────────────────────
@@ -227,7 +261,7 @@ SADECE şu Markdown formatını kullan:
         ("system", system_prompt),
         ("user", "Kod tabanı:\n\n{code}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    return _to_str(chain.invoke({"code": code_input}).content)
+    return _to_str(_safe_invoke(chain, {"code": code_input}).content)
 
 
 # ─────────────────────────────────────────
@@ -253,8 +287,8 @@ Mevcut Uzmanlar:
 Kullanıcı Talebi: "{user_prompt}"
 
 Kurallar:
-1. İhtiyaca göre gerektiği kadar takım kur (Frontend, Backend, Güvenlik vb.)
-2. Her takıma en fazla 3 üye ata.
+1. İhtiyaca göre takımları kur (Örn: Frontend, Backend, Güvenlik). EN FAZLA 3 TAKIM kurabilirsin.
+2. Her takıma EN FAZLA 2 üye ata.
 3. Her takım için net bir "focus_area" belirle — ajanlar bu sınır dışına çıkmamalıdır.
 4. Dizideki sıra = koşturulma sırası. Bağımlılığı olan takımı öne koy.
 5. Çıktın KESİNLİKLE SADECE geçerli bir JSON array olmalıdır:
@@ -280,7 +314,7 @@ Kurallar:
         ("system", system_prompt),
         ("user", "Kod Özeti:\n\n{code}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    result = _strip_md_fence(_to_str(chain.invoke({"code": code_input}).content))
+    result = _strip_md_fence(_to_str(_safe_invoke(chain, {"code": code_input}).content))
 
     try:
         teams = json.loads(result)
@@ -318,7 +352,7 @@ Görevin: Ajan raporlarını inceleyip ciddi çelişki olup olmadığını belir
         ("system", system_prompt),
         ("user", "Ajan Raporları:\n\n{reports}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    raw_result = _strip_md_fence(_to_str(chain.invoke({"reports": reports_text}).content))
+    raw_result = _strip_md_fence(_to_str(_safe_invoke(chain, {"reports": reports_text}).content))
     
     try:
         data = json.loads(raw_result)
@@ -363,7 +397,7 @@ YOU MUST STRICTLY USE THIS MARKDOWN FORMAT (DO NOT ADD ANY OTHER TEXT):
         ("user", "{input}"),
     ]) | llm
     
-    return _strip_md_fence(_to_str(chain.invoke({"input": user_msg}).content))
+    return _strip_md_fence(_to_str(_safe_invoke(chain, {"input": user_msg}).content))
 
 
 # ─────────────────────────────────────────
@@ -409,7 +443,7 @@ Maker Bot bu planı okuyarak kodu doğrudan uygulayacak — soyut değil, somut 
         ("system", system_prompt),
         ("user", f"Takım Uzlaşma Özeti: {final_synthesis}\n\nTakım Raporları:\n\n{{reports}}\n\nCRITICAL: Respond in TURKISH."),
     ]) | llm
-    raw_output = _to_str(chain.invoke({"reports": reports_text}).content)
+    raw_output = _to_str(_safe_invoke(chain, {"reports": reports_text}).content)
     return _check_and_fix_language(raw_output)
 
 
@@ -460,7 +494,7 @@ Kurallar:
         ("system", system_prompt),
         ("user", f"Takım: {team_name}\n\nTalimatlar:\n\n{{brief}}\n\nCRITICAL: Explanations in TURKISH."),
     ]) | llm
-    return _to_str(chain.invoke({"brief": team_brief}).content)
+    return _to_str(_safe_invoke(chain, {"brief": team_brief}).content)
 
 
 # ─────────────────────────────────────────
@@ -536,4 +570,4 @@ def run_code_generator(
         ("system", system_prompt),
         ("user", "{input}\n\nCRITICAL: Explanations in TURKISH."),
     ]) | llm
-    return _to_str(chain.invoke({"input": user_message}).content)
+    return _to_str(_safe_invoke(chain, {"input": user_message}).content)

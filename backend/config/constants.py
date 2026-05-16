@@ -15,7 +15,7 @@ MAX_MAKER_BOT_CONTEXT_CHARS = 800  # Maker Bot, önceki takım bağlamından bu 
 # Çalıştırma Parametreleri
 # ─────────────────────────────────────────
 MAX_ITERATIONS = 2             # Takım başına maksimum iterasyon (konsensüs turları)
-STAGGER_DELAY_SECONDS = 2.0    # Ajan çağrıları arasındaki bekleme (rate-limit koruması)
+STAGGER_DELAY_SECONDS = 5.0    # Ajan çağrıları arasındaki bekleme (rate-limit koruması)
 
 # ─────────────────────────────────────────
 # Dosya İşleme
