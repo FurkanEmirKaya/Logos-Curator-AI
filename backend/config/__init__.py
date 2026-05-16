@@ -1,0 +1,15 @@
+# AI Judge — Konfigürasyon Paketi
+from .constants import (
+    MAX_CODE_CHARS,
+    MAX_PROMPT_CHARS,
+    MAX_DECISION_MAKER_CHARS,
+    MAX_ORCHESTRATOR_REPORT_CHARS,
+    MAX_MAKER_BOT_CONTEXT_CHARS,
+    MAX_ITERATIONS,
+    STAGGER_DELAY_SECONDS,
+    TEXT_EXTENSIONS,
+    ZIP_SKIP_DIRS,
+    DB_NAME,
+    DEFAULT_TEAM,
+)
+from .translations import ROLE_TR, EXP_TR
