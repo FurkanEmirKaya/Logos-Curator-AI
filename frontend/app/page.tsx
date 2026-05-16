@@ -124,6 +124,16 @@ export default function Home() {
   const [generatedFiles, setGeneratedFiles] = useState<GenFile[]>([]);
   const [generatedRaw, setGeneratedRaw] = useState<string>("");
   const [generating, setGenerating] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("gemini-2.5-flash");
+
+  const GEMINI_MODELS = [
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", desc: "En iyi fiyat/performans" },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", desc: "En güçlü muhakeme" },
+    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", desc: "En hızlı, bütçe dostu" },
+    { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash-Lite (Preview)", desc: "Yeni nesil, önizleme" },
+    { id: "gemini-3-flash-preview", label: "Gemini 3 Flash (Preview)", desc: "Sınır sınıfı performans" },
+    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (Preview)", desc: "Gelişmiş zeka + ajan" },
+  ];
 
   const MAX_CODE_CHARS = 100000;
   const MAX_PROMPT_CHARS = 1000;
@@ -169,7 +179,7 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ code: inputCode, user_prompt: userPrompt, agent_ids: selectedAgents }),
+        body: JSON.stringify({ code: inputCode, user_prompt: userPrompt, agent_ids: selectedAgents, model: selectedModel }),
       });
 
       const data = await response.json();
@@ -177,16 +187,24 @@ export default function Home() {
         setTeamReports(data.teams);
         setDependenciesMd(data.dependencies_md || "");
         setCodemapMd(data.codemap_md || "");
-        // Drawer için mevcut oturumu oluştur (DB'ye kaydedilince ID gelecek, şimşilik local)
+        // Sadece gerçek bir DB session_id varsa oturumu kaydet.
+        // data.session_id null/undefined gelirse (DB hatası) Date.now() kullanmıyoruz —
+        // bu sahte ID backend'de bulunamaz ve resume her zaman hata verir.
+        const realSessionId = typeof data.session_id === "number" && data.session_id > 0
+          ? data.session_id
+          : null;
         setCurrentSession({
-          id: data.session_id || Date.now(),
+          id: realSessionId,
           timestamp: new Date().toISOString(),
           user_prompt: userPrompt,
           teams: data.teams,
           dependencies_md: data.dependencies_md || "",
           codemap_md: data.codemap_md || "",
         });
-        setDrawerOpen(true);
+        if (!realSessionId) {
+          console.warn("⚠️ Oturum veritabanına kaydedilemedi — session_id döndürülmedi. 'Mevcut Analize Ekle' bu oturum için kullanılamaz.");
+        }
+        // Drawer artık otomatik açılmıyor — kullanıcı isterse sol bar'dan açar
         const allChosenAgents = data.teams.flatMap((t: any) => Object.keys(t.reports));
         if (allChosenAgents.length > 0) {
           setSelectedAgents(allChosenAgents);
@@ -202,14 +220,21 @@ export default function Home() {
   };
 
   const handleResume = async () => {
-    if (!currentSession || !currentSession.id || selectedAgents.length === 0) return;
+    if (!currentSession || typeof currentSession.id !== "number" || currentSession.id <= 0 || selectedAgents.length === 0) {
+      alert("Bu analiz oturumu veritabanına kaydedilememiş. Lütfen yeni bir değerlendirme başlatın ve tekrar deneyin.");
+      return;
+    }
     setLoading(true);
 
     try {
       const response = await fetch("http://localhost:8001/analyze/resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: currentSession.id, new_agent_ids: selectedAgents }),
+        body: JSON.stringify({
+          session_id: currentSession.id,
+          new_agent_ids: selectedAgents,
+          model: selectedModel
+        }),
       });
 
       const data = await response.json();
@@ -420,7 +445,7 @@ export default function Home() {
           <p className="mt-2 text-xl" style={{ color: '#475569' }}>Projenizi Logos Arena'ya yükleyin, uzman kurullarımız sentezleyip raporlasın.</p>
         </header>
 
-        <main className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <main className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
           {/* SOL PANEL: Girdi Alanı */}
           <div className="flex flex-col gap-5 bg-white p-7 rounded-3xl shadow-md" style={{ border: '1.5px solid #cbd5e1' }}>
             {/* Mode Seçici */}
@@ -547,6 +572,26 @@ export default function Home() {
               )}
             </div>
 
+            {/* Model Seçici */}
+            <div>
+              <h3 className="text-sm font-bold mb-2 uppercase tracking-widest" style={{ color: '#0f766e', fontSize: '0.75rem' }}>
+                🤖 AI Modeli <span style={{ color: '#94a3b8', fontWeight: 400 }}>(Tüm ajanlar bu modeli kullanır)</span>
+              </h3>
+              <div className="relative">
+                <select
+                  value={selectedModel}
+                  onChange={e => setSelectedModel(e.target.value)}
+                  className="w-full appearance-none p-3 pr-10 rounded-2xl text-sm font-semibold focus:outline-none transition-all cursor-pointer"
+                  style={{ border: '1.5px solid #0f766e', background: '#f0fdfa', color: '#0f172a', boxShadow: '0 1px 6px #0f766e10' }}
+                >
+                  {GEMINI_MODELS.map(m => (
+                    <option key={m.id} value={m.id}>{m.label} — {m.desc}</option>
+                  ))}
+                </select>
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-teal-600 pointer-events-none">▾</span>
+              </div>
+            </div>
+
             {/* Karar Verici Prompt Alanı */}
             <div>
               <div className="flex justify-between items-center mb-2">
@@ -593,7 +638,7 @@ export default function Home() {
                 >
                   {loading ? <span className="animate-pulse">⏳ Çalışıyor...</span> : <span>⚡ Yeni Değerlendirme Başlat</span>}
                 </button>
-                {currentSession && currentSession.id && (
+                {currentSession && typeof currentSession.id === "number" && currentSession.id > 0 && (
                   <button
                     onClick={handleResume}
                     disabled={!mounted || loading || selectedAgents.length === 0}
@@ -632,7 +677,7 @@ export default function Home() {
           </div>
 
           {/* SAĞ PANEL */}
-          <div className="flex flex-col gap-6 h-[85vh] overflow-y-auto pr-2 pb-12">
+          <div className="flex flex-col flex-1 gap-6 pr-2 pb-12">
 
             {/* Üretim Modu — FileTreeViewer */}
             {mode !== "inceleme" && (
@@ -656,7 +701,7 @@ export default function Home() {
                   </div>
                 )}
                 {!generating && generatedFiles.length === 0 && (
-                  <div className="h-full flex flex-col items-center justify-center rounded-3xl p-8 text-center" style={{ border: '2px dashed #94a3b8', background: '#f8fafc' }}>
+                  <div className="flex-1 min-h-[400px] flex flex-col items-center justify-start pt-24 rounded-3xl p-8 text-center" style={{ border: '2px dashed #94a3b8', background: '#f8fafc' }}>
                     <span className="text-5xl mb-4">{MODES.find(m => m.id === mode)?.icon}</span>
                     <p className="text-lg font-bold" style={{ color: '#0f766e' }}>{MODES.find(m => m.id === mode)?.label} sonuçları burada görünecek</p>
                     <p className="text-base mt-2" style={{ color: '#475569' }}>Sol paneli doldurup butona basın.</p>
@@ -667,7 +712,7 @@ export default function Home() {
 
             {/* İnceleme Modu — Bekleme / Boş Durum */}
             {mode === "inceleme" && teamReports.length === 0 && !loading && (
-              <div className="h-full flex flex-col items-center justify-center rounded-3xl p-8 text-center" style={{ border: '2px dashed #94a3b8', background: '#f8fafc' }}>
+              <div className="flex-1 min-h-[400px] flex flex-col items-center justify-start pt-24 rounded-3xl p-8 text-center" style={{ border: '2px dashed #94a3b8', background: '#f8fafc' }}>
                 <span className="text-5xl mb-4">🏛️</span>
                 <p className="text-lg font-bold" style={{ color: '#0f766e' }}>Komite raporları burada görüntülenecek</p>
                 <p className="text-base mt-2" style={{ color: '#475569' }}>Sol panelden talimatınızı verin ve değerlendirmeyi başlatın.</p>
@@ -677,8 +722,26 @@ export default function Home() {
 
             {/* Yükleniyor Ekranı */}
             {loading && (
-              <div className="h-full flex items-center justify-center text-blue-500 border-2 border-dashed border-blue-200 rounded-2xl bg-blue-50/50">
-                <span className="animate-bounce text-2xl">⏳ Takımlar kuruluyor ve kod inceleniyor...</span>
+              <div className="h-64 flex flex-col items-center justify-center rounded-3xl gap-5" style={{ border: '2px dashed #0f766e', background: 'linear-gradient(135deg,#f0fdfa,#f8fafc)' }}>
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl animate-spin" style={{ animationDuration: '2s' }}>⚙️</span>
+                  <span className="text-lg font-bold" style={{ color: '#0f766e' }}>Komite Oluşturuluyor...</span>
+                </div>
+                <div className="flex flex-col items-center gap-2 text-sm" style={{ color: '#475569' }}>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
+                    Takımlar kuruluyor ve atamalar yapılıyor
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" style={{ animationDelay: '0.4s' }} />
+                    Uzmanlar kodu inceliyor
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-slate-400 animate-pulse" style={{ animationDelay: '0.8s' }} />
+                    Sentez ve raporlama yapılıyor
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: '#94a3b8' }}>Model: {GEMINI_MODELS.find(m => m.id === selectedModel)?.label}</p>
               </div>
             )}
 
@@ -792,11 +855,11 @@ export default function Home() {
                             }
                             if (matches.length > 0) {
                               const combinedCode = matches.join("\n\n");
-                              const blob = new Blob([combinedCode], { type: "text/plain" });
+                              const blob = new Blob([combinedCode], { type: "text/markdown" });
                               const url = URL.createObjectURL(blob);
                               const a = document.createElement("a");
                               a.href = url;
-                              a.download = `${rev.team_name?.replace(/\s/g, "_")}_kod.txt`;
+                              a.download = `${rev.team_name?.replace(/\s/g, "_")}_kod.md`;
                               a.click();
                               URL.revokeObjectURL(url);
                             } else {
@@ -810,14 +873,29 @@ export default function Home() {
                         <button
                           onClick={() => {
                             const codeBlockRegex = /```[\w]*\n([\s\S]*?)```/g;
-                            let matches = [];
+                            const matches: string[] = [];
                             let match;
                             while ((match = codeBlockRegex.exec(rev.revision)) !== null) {
                               matches.push(match[1].trim());
                             }
                             if (matches.length > 0) {
-                              setInputCode(matches.join("\n\n"));
-                              alert("✅ Revize edilen kodlar başarıyla 'Kod/Konsept' alanına aktarıldı. Şimdi sol panelden kurulları tekrar toplayarak yeni bir inceleme veya muhakeme başlatabilirsiniz.");
+                              const revisionCode = matches.join("\n\n");
+                              setInputCode(prev => {
+                                if (!prev.trim()) return revisionCode;
+                                return prev + "\n\n// ─── Sentez Merkezi Revizyonu ───\n" + revisionCode;
+                              });
+                              // Uygulama sonrası tam kodu indirme — inputCode güncellendiğinden setTimeout ile al
+                              setTimeout(() => {
+                                const finalCode = (document.querySelector('textarea[placeholder*="İncelemeye"]') as HTMLTextAreaElement)?.value || revisionCode;
+                                const blob = new Blob([finalCode], { type: "text/markdown" });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement("a");
+                                a.href = url;
+                                a.download = `${rev.team_name?.replace(/\s/g, "_")}_tam_revizyon.md`;
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              }, 200);
+                              alert("✅ Revizyonlar mevcut koda eklendi. İndirme de başlatıldı.");
                             } else {
                               alert("⚠️ Uygulanacak herhangi bir kod bloğu bulunamadı.");
                             }
